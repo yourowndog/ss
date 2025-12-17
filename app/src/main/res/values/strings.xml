@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ScreenSense</string>
+    <string name="tile_label">Read Screen</string>
+    <string name="accessibility_service_description">ScreenSense uses accessibility to detect trigger gestures and read screen content aloud using AI.</string>
+    
+    <!-- Main Activity -->
+    <string name="setup_title">ScreenSense Setup</string>
+    <string name="permission_section">Permissions</string>
+    <string name="screen_capture_permission">Screen Capture</string>
+    <string name="screen_capture_description">Required to capture screen content for AI analysis</string>
+    <string name="accessibility_permission">Accessibility Service</string>
+    <string name="accessibility_description">Optional: Enables gesture triggers and direct screen reading</string>
+    <string name="btn_grant">Grant</string>
+    <string name="btn_enable">Enable</string>
+    <string name="status_granted">Granted</string>
+    <string name="status_enabled">Enabled</string>
+    <string name="status_not_granted">Not Granted</string>
+    <string name="status_disabled">Disabled</string>
+    
+    <!-- Service -->
+    <string name="notification_channel_name">Screen Reader</string>
+    <string name="notification_title">ScreenSense Active</string>
+    <string name="notification_text">Tap the Quick Settings tile to read your screen</string>
+    <string name="reading_screen">Reading screen…</string>
+    <string name="no_content">No readable content found on screen</string>
+</resources>
