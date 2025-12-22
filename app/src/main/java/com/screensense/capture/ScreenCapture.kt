@@ -1,6 +1,5 @@
 package com.screensense.capture
 
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -11,15 +10,23 @@ import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 
 /**
- * Wrapper for Android's MediaProjection API to capture screen content.
+ * Screen capture using MediaProjection.
+ * 
+ * IMPORTANT: On Android 14+, the virtual display MUST be created immediately
+ * after getting the MediaProjection. The token cannot be stored for later use.
+ * 
+ * Flow:
+ * 1. User grants permission -> get MediaProjection
+ * 2. IMMEDIATELY create VirtualDisplay and start capturing
+ * 3. capture() just reads from the already-running stream
  */
 class ScreenCapture(private val context: Context) {
     
@@ -31,10 +38,23 @@ class ScreenCapture(private val context: Context) {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     
     private var screenWidth: Int = 0
     private var screenHeight: Int = 0
     private var screenDensity: Int = 0
+    
+    @Volatile
+    private var isSessionActive = false
+    
+    // Callback required for Android 14+
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            Log.d(TAG, "MediaProjection stopped by system - session ended")
+            isSessionActive = false
+            cleanupCapture()
+        }
+    }
     
     init {
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -44,43 +64,47 @@ class ScreenCapture(private val context: Context) {
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
         screenDensity = metrics.densityDpi
+        Log.d(TAG, "Screen: ${screenWidth}x${screenHeight} @ ${screenDensity}dpi")
     }
     
     /**
-     * Initialize the media projection with the result from the permission activity.
+     * Initialize AND START the capture session immediately.
+     * On Android 14+, we MUST create the VirtualDisplay right away.
+     * 
+     * @return true if session started successfully
      */
-    fun initialize(resultCode: Int, data: Intent) {
+    fun initializeAndStart(resultCode: Int, data: Intent): Boolean {
+        Log.d(TAG, "initializeAndStart called")
+        
+        // Clean up any existing session
+        release()
+        
         val projectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(resultCode, data)
         
         if (mediaProjection == null) {
-            Log.e(TAG, "Failed to create media projection")
-            return
+            Log.e(TAG, "Failed to get MediaProjection")
+            return false
         }
         
-        Log.d(TAG, "MediaProjection initialized. Screen: ${screenWidth}x${screenHeight} @ ${screenDensity}dpi")
-    }
-    
-    /**
-     * Capture the current screen and return as a Bitmap.
-     * @return The captured screen, or null if capture failed.
-     */
-    suspend fun capture(): Bitmap? = withContext(Dispatchers.IO) {
-        if (mediaProjection == null) {
-            Log.e(TAG, "MediaProjection not initialized")
-            return@withContext null
+        Log.d(TAG, "Got MediaProjection, registering callback...")
+        
+        // Register callback (required for Android 14+) - BEFORE createVirtualDisplay
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            mediaProjection?.registerCallback(projectionCallback, mainHandler)
         }
+        
+        // IMMEDIATELY create the ImageReader and VirtualDisplay
+        Log.d(TAG, "Creating ImageReader and VirtualDisplay IMMEDIATELY...")
         
         try {
-            // Create ImageReader
             imageReader = ImageReader.newInstance(
-                screenWidth, 
-                screenHeight, 
-                PixelFormat.RGBA_8888, 
+                screenWidth,
+                screenHeight,
+                PixelFormat.RGBA_8888,
                 2
             )
             
-            // Create VirtualDisplay
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenSenseCapture",
                 screenWidth,
@@ -88,30 +112,77 @@ class ScreenCapture(private val context: Context) {
                 screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader?.surface,
-                null,
-                null
+                object : VirtualDisplay.Callback() {
+                    override fun onStopped() {
+                        Log.d(TAG, "VirtualDisplay stopped")
+                    }
+                },
+                mainHandler
             )
             
-            // Wait a bit for the frame to be captured
-            delay(150)
+            if (virtualDisplay == null) {
+                Log.e(TAG, "Failed to create VirtualDisplay")
+                release()
+                return false
+            }
             
-            // Get the latest image
+            isSessionActive = true
+            Log.d(TAG, "Capture session started successfully!")
+            return true
+            
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException creating VirtualDisplay", e)
+            release()
+            return false
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception creating VirtualDisplay", e)
+            release()
+            return false
+        }
+    }
+    
+    /**
+     * Capture a frame from the already-running stream.
+     * The VirtualDisplay was created in initializeAndStart().
+     */
+    fun captureFrame(): Bitmap? {
+        if (!isSessionActive) {
+            Log.e(TAG, "No active capture session")
+            return null
+        }
+        
+        if (imageReader == null) {
+            Log.e(TAG, "ImageReader is null")
+            return null
+        }
+        
+        try {
+            // Give a moment for a fresh frame
+            Thread.sleep(100)
+            
             val image = imageReader?.acquireLatestImage()
-            val bitmap = image?.let { imageToBitmap(it) }
+            if (image == null) {
+                Log.w(TAG, "No image available, retrying...")
+                Thread.sleep(100)
+                val retryImage = imageReader?.acquireLatestImage()
+                if (retryImage == null) {
+                    Log.e(TAG, "Still no image available")
+                    return null
+                }
+                val bitmap = imageToBitmap(retryImage)
+                retryImage.close()
+                return bitmap
+            }
             
-            image?.close()
+            val bitmap = imageToBitmap(image)
+            image.close()
             
-            // Clean up virtual display (but keep projection alive for next capture)
-            virtualDisplay?.release()
-            virtualDisplay = null
-            imageReader?.close()
-            imageReader = null
-            
-            return@withContext bitmap
+            Log.d(TAG, "Captured frame: ${bitmap.width}x${bitmap.height}")
+            return bitmap
             
         } catch (e: Exception) {
-            Log.e(TAG, "Error capturing screen", e)
-            return@withContext null
+            Log.e(TAG, "Error capturing frame", e)
+            return null
         }
     }
     
@@ -138,19 +209,41 @@ class ScreenCapture(private val context: Context) {
     }
     
     /**
-     * Check if the screen capture is ready to use.
+     * Check if there's an active capture session ready for frame capture.
      */
-    fun isReady(): Boolean = mediaProjection != null
+    fun isReady(): Boolean = isSessionActive && mediaProjection != null && virtualDisplay != null
     
-    /**
-     * Release all resources.
-     */
-    fun release() {
+    private fun cleanupCapture() {
         virtualDisplay?.release()
         virtualDisplay = null
         imageReader?.close()
         imageReader = null
-        mediaProjection?.stop()
+    }
+    
+    /**
+     * Release all resources and end the capture session.
+     */
+    fun release() {
+        Log.d(TAG, "Releasing all resources")
+        isSessionActive = false
+        
+        cleanupCapture()
+        
+        val projection = mediaProjection
+        if (projection != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                try {
+                    projection.unregisterCallback(projectionCallback)
+                } catch (e: Exception) {
+                    // Ignore
+                }
+            }
+            try {
+                projection.stop()
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
         mediaProjection = null
     }
 }

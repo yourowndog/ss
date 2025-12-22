@@ -30,6 +30,9 @@ class PiperTTSProvider(private val context: Context) : TTSProvider {
     private var speechSpeed = 1.0f
     private var isInitialized = false
     
+    @Volatile
+    private var isSpeakingFlag = false
+    
     init {
         initializeTts()
     }
@@ -93,8 +96,9 @@ class PiperTTSProvider(private val context: Context) : TTSProvider {
     
     private fun getModelDirectory(): File? {
         // Check external storage first (for ADB pushed models)
-        val externalDir = File("/sdcard/ScreenSense/vits-piper-en_US-libritts_r-medium")
-        if (externalDir.exists()) {
+        // Models are directly in /sdcard/ScreenSense/ (not in subdirectory)
+        val externalDir = File("/sdcard/ScreenSense")
+        if (File(externalDir, "en_US-libritts_r-medium.onnx").exists()) {
             Log.d(TAG, "Found model at: ${externalDir.absolutePath}")
             return externalDir
         }
@@ -135,6 +139,7 @@ class PiperTTSProvider(private val context: Context) : TTSProvider {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error generating speech", e)
+                isSpeakingFlag = false
             }
         }
     }
@@ -172,13 +177,39 @@ class PiperTTSProvider(private val context: Context) : TTSProvider {
             .setTransferMode(AudioTrack.MODE_STATIC)
             .build()
         
+        // Set up notification when playback completes
+        audioTrack?.setNotificationMarkerPosition(pcmData.size)
+        audioTrack?.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
+            override fun onMarkerReached(track: AudioTrack?) {
+                Log.d(TAG, "Playback completed")
+                isSpeakingFlag = false
+            }
+            override fun onPeriodicNotification(track: AudioTrack?) {}
+        })
+        
+        isSpeakingFlag = true
         audioTrack?.write(pcmData, 0, pcmData.size)
         audioTrack?.play()
     }
     
     override fun stop() {
-        audioTrack?.stop()
+        isSpeakingFlag = false
+        audioTrack?.apply {
+            try {
+                stop()
+                flush()
+                release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping audio", e)
+            }
+        }
+        audioTrack = null
     }
+    
+    /**
+     * Check if audio is currently playing.
+     */
+    fun isSpeaking(): Boolean = isSpeakingFlag
     
     override fun setSpeed(speed: Float) {
         speechSpeed = speed.coerceIn(0.5f, 2.0f)
@@ -196,6 +227,21 @@ class PiperTTSProvider(private val context: Context) : TTSProvider {
         speakerId = id.coerceIn(0, maxSpeakers - 1)
         Log.d(TAG, "Speaker set to: $speakerId")
     }
+    
+    /**
+     * Get the current speaker ID.
+     */
+    fun getSpeakerId(): Int = speakerId
+    
+    /**
+     * Get the total number of available speakers.
+     */
+    fun getNumSpeakers(): Int = tts?.numSpeakers() ?: 1
+    
+    /**
+     * Get the current speech speed.
+     */
+    fun getSpeed(): Float = speechSpeed
     
     override fun getProviderName(): String = "Piper (libritts_r-medium)"
     

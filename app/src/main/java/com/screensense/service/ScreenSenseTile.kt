@@ -43,7 +43,9 @@ class ScreenSenseTile : TileService() {
         }
         
         // Trigger the screen read
-        val triggerIntent = ScreenSenseService.createTriggerIntent(this)
+        val triggerIntent = android.content.Intent(this, ScreenSenseService::class.java).apply {
+            action = ScreenSenseService.ACTION_CAPTURE_FRAME
+        }
         startService(triggerIntent)
     }
     

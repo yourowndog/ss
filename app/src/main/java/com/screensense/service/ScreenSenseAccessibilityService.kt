@@ -1,16 +1,17 @@
 package com.screensense.service
 
+import android.accessibilityservice.AccessibilityButtonController
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.os.Build
 import android.util.Log
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 
 /**
  * Accessibility Service that can trigger screen reading via:
- * - Volume button combos
- * - Accessibility button in navigation bar
- * - System gestures
+ * - Accessibility button (floating button or nav bar button)
+ * - Volume button combos (Volume Down then Volume Up)
  * 
  * This service can also directly read screen content via the accessibility tree,
  * which is faster than screenshot-based OCR for text-heavy screens.
@@ -31,6 +32,9 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
     private var lastVolumeDownTime = 0L
     private var lastVolumeUpTime = 0L
     
+    // Accessibility button callback for API 26+
+    private var accessibilityButtonCallback: AccessibilityButtonController.AccessibilityButtonCallback? = null
+    
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -40,6 +44,23 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
         // Configure the service
         serviceInfo = serviceInfo.apply {
             flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_ACCESSIBILITY_BUTTON
+        }
+        
+        // Register accessibility button callback for API 26+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val controller = accessibilityButtonController
+            accessibilityButtonCallback = object : AccessibilityButtonController.AccessibilityButtonCallback() {
+                override fun onClicked(controller: AccessibilityButtonController) {
+                    Log.d(TAG, "Accessibility button clicked!")
+                    triggerScreenRead()
+                }
+
+                override fun onAvailabilityChanged(controller: AccessibilityButtonController, available: Boolean) {
+                    Log.d(TAG, "Accessibility button availability changed: $available")
+                }
+            }
+            controller.registerAccessibilityButtonCallback(accessibilityButtonCallback!!)
+            Log.d(TAG, "Registered accessibility button callback")
         }
     }
     
@@ -52,111 +73,168 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Accessibility Service interrupted")
     }
     
-    /**
-     * Note: onAccessibilityButtonClicked is deprecated.
-     * Use AccessibilityButtonController callback for API 26+.
-     * For now, this method is removed - button click handled via service config.
-     */
-    private fun triggerFromAccessibilityButton() {
-        Log.d(TAG, "Accessibility button triggered")
-        triggerScreenRead()
+    override fun onDestroy() {
+        super.onDestroy()
+        instance = null
+        
+        // Unregister callback
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && accessibilityButtonCallback != null) {
+            accessibilityButtonController.unregisterAccessibilityButtonCallback(accessibilityButtonCallback!!)
+        }
+        
+        Log.d(TAG, "Accessibility Service destroyed")
     }
     
     /**
-     * Detect volume button combos (Volume Down + Volume Up simultaneously).
+     * Detect volume button combos (Volume Down then Volume Up quickly).
      */
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (event.action != KeyEvent.ACTION_DOWN) {
             return super.onKeyEvent(event)
         }
         
-        val currentTime = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
         
         when (event.keyCode) {
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                lastVolumeDownTime = currentTime
-                checkVolumeCombo(currentTime)
+                lastVolumeDownTime = now
+                
+                // Check if Volume Up was pressed recently
+                if (now - lastVolumeUpTime < VOLUME_COMBO_TIMEOUT_MS) {
+                    Log.d(TAG, "Volume combo detected (Up then Down)")
+                    triggerScreenRead()
+                    return true // Consume the event
+                }
             }
+            
             KeyEvent.KEYCODE_VOLUME_UP -> {
-                lastVolumeUpTime = currentTime
-                checkVolumeCombo(currentTime)
+                lastVolumeUpTime = now
+                
+                // Check if Volume Down was pressed recently
+                if (now - lastVolumeDownTime < VOLUME_COMBO_TIMEOUT_MS) {
+                    Log.d(TAG, "Volume combo detected (Down then Up)")
+                    triggerScreenRead()
+                    return true // Consume the event
+                }
             }
         }
         
         return super.onKeyEvent(event)
     }
     
-    private fun checkVolumeCombo(currentTime: Long) {
-        // Check if both volume buttons were pressed within the timeout
-        val downDelta = currentTime - lastVolumeDownTime
-        val upDelta = currentTime - lastVolumeUpTime
-        
-        if (downDelta < VOLUME_COMBO_TIMEOUT_MS && upDelta < VOLUME_COMBO_TIMEOUT_MS) {
-            Log.d(TAG, "Volume combo detected!")
-            triggerScreenRead()
-            
-            // Reset to prevent repeated triggers
-            lastVolumeDownTime = 0L
-            lastVolumeUpTime = 0L
-        }
+    private fun resetVolumeCombo() {
+        lastVolumeDownTime = 0L
+        lastVolumeUpTime = 0L
     }
     
     /**
      * Trigger screen reading via the main service.
      */
     private fun triggerScreenRead() {
-        val intent = ScreenSenseService.createTriggerIntent(this)
-        startService(intent)
+        Log.d(TAG, "Triggering screen read toggle...")
+        
+        val intent = android.content.Intent(this, ScreenSenseService::class.java).apply {
+            action = ScreenSenseService.ACTION_TOGGLE_READ
+        }
+        
+        try {
+            startService(intent)
+            Log.d(TAG, "Sent ACTION_TOGGLE_READ to service")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start service", e)
+        }
+        
+        resetVolumeCombo()
     }
     
     /**
      * Read screen content directly from the accessibility tree.
-     * This is an alternative to screenshot-based OCR that's faster for text.
+     * PRIORITY: Real text content (paragraphs, articles) over UI labels.
      * 
      * @return All text content visible on screen
      */
     fun readScreenContentFromAccessibilityTree(): String {
         val rootNode = rootInActiveWindow ?: return ""
         
-        val textContent = StringBuilder()
-        extractTextFromNode(rootNode, textContent)
+        val textNodes = mutableListOf<Pair<String, android.graphics.Rect>>()
+        collectTextNodes(rootNode, textNodes, 0)
         rootNode.recycle()
         
-        return textContent.toString().trim()
+        // Sort by visual position: Top-to-Bottom, then Left-to-Right
+        textNodes.sortWith(Comparator { a, b ->
+            val rectA = a.second
+            val rectB = b.second
+            
+            if (kotlin.math.abs(rectA.top - rectB.top) > 40) {
+                rectA.top - rectB.top
+            } else {
+                rectA.left - rectB.left
+            }
+        })
+        
+        val result = textNodes.joinToString(" ") { it.first }
+        Log.d(TAG, "Collected ${textNodes.size} text nodes, total ${result.length} chars")
+        return result
     }
     
-    private fun extractTextFromNode(
+    // Short labels that are almost always UI noise, not content
+    private val IGNORED_LABELS = setOf(
+        "back", "navigate up", "close", "search", "send", "attach", "emoji", 
+        "voice message", "camera", "settings", "profile", "menu", "more options",
+        "share", "copy", "paste", "cut", "select all", "home", "tab", "notifications",
+        "double tap to activate", "double-tap to activate", "unlabeled"
+    )
+
+    private fun collectTextNodes(
         node: android.view.accessibility.AccessibilityNodeInfo,
-        builder: StringBuilder
+        nodes: MutableList<Pair<String, android.graphics.Rect>>,
+        depth: Int
     ) {
-        // Get text from this node
-        node.text?.let { text ->
-            if (text.isNotBlank()) {
-                builder.append(text).append(" ")
+        if (!node.isVisibleToUser) return
+        
+        val nodeText = node.text?.toString()?.trim()
+        val nodeDesc = node.contentDescription?.toString()?.trim()
+        val isClickable = node.isClickable
+        
+        // PRIORITY 1: node.text - This is the actual displayed text (paragraphs, articles, etc.)
+        // This is what we WANT for reading content.
+        if (!nodeText.isNullOrBlank()) {
+            // Skip very short text on clickable elements (buttons like "OK", "Cancel")
+            val isButton = isClickable && nodeText.length < 30
+            
+            if (!isButton && !isSymbolNoise(nodeText)) {
+                val rect = android.graphics.Rect()
+                node.getBoundsInScreen(rect)
+                nodes.add(nodeText to rect)
             }
         }
-        
-        // Get content description if no text
-        if (node.text.isNullOrBlank()) {
-            node.contentDescription?.let { desc ->
-                if (desc.isNotBlank()) {
-                    builder.append(desc).append(" ")
-                }
+        // PRIORITY 2: contentDescription - ONLY for non-clickable, long descriptions
+        // Short contentDescriptions are almost always button labels ("Back", "Search")
+        else if (!nodeDesc.isNullOrBlank()) {
+            val lowerDesc = nodeDesc.lowercase()
+            val isIgnoredLabel = IGNORED_LABELS.any { lowerDesc == it || lowerDesc.contains(it) }
+            
+            // Only use contentDescription if it's long enough to be actual content
+            // AND it's not a known UI label AND the node isn't clickable (buttons)
+            if (!isIgnoredLabel && !isClickable && nodeDesc.length > 50) {
+                val rect = android.graphics.Rect()
+                node.getBoundsInScreen(rect)
+                nodes.add(nodeDesc to rect)
             }
         }
         
         // Recurse into children
         for (i in 0 until node.childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                extractTextFromNode(child, builder)
-                child.recycle()
-            }
+            val child = node.getChild(i) ?: continue
+            collectTextNodes(child, nodes, depth + 1)
+            child.recycle()
         }
     }
     
-    override fun onDestroy() {
-        instance = null
-        super.onDestroy()
+    /**
+     * Check if text is purely presentational symbols (bullets, ellipsis, etc.)
+     */
+    private fun isSymbolNoise(text: String): Boolean {
+        return text.matches(Regex("^[•·|…\\-–—]+$")) || text == "..."
     }
 }
