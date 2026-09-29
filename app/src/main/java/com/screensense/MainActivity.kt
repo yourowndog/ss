@@ -122,6 +122,11 @@ class MainActivity : AppCompatActivity() {
         setupClickListeners()
         setupVoiceSettingsListeners()
         requestNotificationPermission()
+
+        val ttsHelperIntent = Intent(this, ScreenSenseService::class.java).apply {
+            action = ScreenSenseService.ACTION_START_TTS_HELPER
+        }
+        ContextCompat.startForegroundService(this, ttsHelperIntent)
     }
     
     override fun onResume() {

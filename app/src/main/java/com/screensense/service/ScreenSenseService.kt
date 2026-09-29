@@ -46,6 +46,7 @@ class ScreenSenseService : Service() {
         
         // Actions
         const val ACTION_START_PROJECTION = "com.screensense.START_PROJECTION"
+        const val ACTION_START_TTS_HELPER = "com.screensense.START_TTS_HELPER"
         const val ACTION_CAPTURE_FRAME = "com.screensense.CAPTURE_FRAME"
         const val ACTION_TOGGLE_READ = "com.screensense.TOGGLE_READ"
         const val ACTION_SPEAK_TEXT = "com.screensense.SPEAK_TEXT"
@@ -121,6 +122,19 @@ class ScreenSenseService : Service() {
         Log.d(TAG, "onStartCommand: ${intent?.action}")
         
         when (intent?.action) {
+            ACTION_START_TTS_HELPER -> {
+                Log.d(TAG, "Starting persistent Watch TTS helper")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        createTtsNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, createTtsNotification())
+                }
+            }
+
             ACTION_START_PROJECTION -> {
                 // Step 1: Start foreground FIRST with correct type
                 Log.d(TAG, "Starting foreground service with MEDIA_PROJECTION type")
@@ -385,6 +399,17 @@ class ScreenSenseService : Service() {
     }
 
     /**
+     * Watch-triggered speech is intentionally pinned to the Sam cloud provider
+     * and does not depend on the ScreenSense UI provider selection.
+     */
+    fun speakWatchText(text: String) {
+        serviceScope.launch {
+            cloudTtsProvider.setVoice("sam")
+            cloudTtsProvider.speak(text)
+        }
+    }
+
+    /**
      * Start the loopback HTTP server for Zepp Side Service control.
      * Binds to 127.0.0.1 only — never exported.
      */
@@ -395,7 +420,7 @@ class ScreenSenseService : Service() {
             TTS_HTTP_PORT
         }
         val server = TtsHttpServer(httpPort) { text ->
-            speakText(text)
+            speakWatchText(text)
         }
         server.start()
         ttsHttpServer = server
@@ -416,6 +441,23 @@ class ScreenSenseService : Service() {
     suspend fun downloadLastVoiceGeneration(): String? =
         cloudTtsProvider.saveLastGenerationToDownloads()
     
+    private fun createTtsNotification(): Notification {
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, ScreenSenseApp.NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("Hermes Watch Voice")
+            .setContentText("Ready to play Watch replies")
+            .setSmallIcon(R.drawable.ic_screen_reader)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+    }
+
     private fun createNotification(): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this,
