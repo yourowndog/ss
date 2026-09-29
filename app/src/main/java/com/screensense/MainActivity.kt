@@ -16,6 +16,7 @@ import android.os.IBinder
 import android.provider.Settings
 import android.util.Log
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import android.view.accessibility.AccessibilityManager
 import android.os.Environment
@@ -23,11 +24,10 @@ import android.net.Uri
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.screensense.databinding.ActivityMainBinding
 import com.screensense.service.ScreenSenseService
-import com.screensense.tts.PiperTTSProvider
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import com.screensense.tts.OpenAITTSProvider
 import kotlinx.coroutines.launch
 
 /**
@@ -46,6 +46,8 @@ class MainActivity : AppCompatActivity() {
         private const val PREF_SPEAKER_ID = "speaker_id"
         private const val PREF_SPEECH_SPEED = "speech_speed"
         private const val PREF_USE_CLOUD = "use_cloud"
+        private const val PREF_VOICE_CONFIG_VERSION = "voice_config_version"
+        private const val VOICE_CONFIG_VERSION = 1
     }
     
     private lateinit var binding: ActivityMainBinding
@@ -99,6 +101,7 @@ class MainActivity : AppCompatActivity() {
             screenSenseService = localBinder.getService()
             isServiceBound = true
             Log.d(TAG, "Service bound")
+            applyVoiceSettingsToService()
             updateUI()
         }
         
@@ -171,10 +174,14 @@ class MainActivity : AppCompatActivity() {
             triggerTestVoice()
         }
 
+        binding.btnDownloadVoice.setOnClickListener {
+            downloadLastVoiceGeneration()
+        }
+
         binding.rgProvider.setOnCheckedChangeListener { _, checkedId ->
             useCloud = checkedId == R.id.rbCloud
             updateVoiceSliderRange()
-            screenSenseService?.setUseCloud(useCloud)
+            applyVoiceSettingsToService()
             saveVoiceSettings()
             updateSpeakerLabel()
         }
@@ -185,7 +192,7 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun updateVoiceSliderRange() {
-        val max = if (useCloud) 5f else 10f
+        val max = if (useCloud) (OpenAITTSProvider.VOICES.size - 1).toFloat() else 10f
         binding.sliderSpeaker.valueTo = max
         if (currentSpeakerId > max) {
             currentSpeakerId = max.toInt()
@@ -228,7 +235,14 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun updateSpeakerLabel() {
-        val voiceName = screenSenseService?.getVoiceName(currentSpeakerId) ?: "Voice ${currentSpeakerId + 1}"
+        val fallbackName = if (useCloud) {
+            OpenAITTSProvider.VOICES.getOrNull(currentSpeakerId)?.displayName
+        } else {
+            null
+        }
+        val voiceName = screenSenseService?.getVoiceName(currentSpeakerId)
+            ?: fallbackName
+            ?: "Voice ${currentSpeakerId + 1}"
         binding.labelSpeaker.text = "Voice: $voiceName"
     }
     
@@ -237,12 +251,22 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun loadVoiceSettings() {
-        currentSpeakerId = prefs.getInt(PREF_SPEAKER_ID, 1)
+        if (prefs.getInt(PREF_VOICE_CONFIG_VERSION, 0) < VOICE_CONFIG_VERSION) {
+            // Migrate existing installs to the new Sam voice instead of
+            // preserving the old Kokoro/OpenAI provider selection.
+            currentSpeakerId = 0
+            currentSpeed = 1.0f
+            useCloud = true
+            saveVoiceSettings()
+            return
+        }
+
+        currentSpeakerId = prefs.getInt(PREF_SPEAKER_ID, 0)
         currentSpeed = prefs.getFloat(PREF_SPEECH_SPEED, 1.0f)
-        useCloud = prefs.getBoolean(PREF_USE_CLOUD, false)
+        useCloud = prefs.getBoolean(PREF_USE_CLOUD, true)
         
         // Cap speaker ID based on provider
-        val max = if (useCloud) 5 else 10
+        val max = if (useCloud) OpenAITTSProvider.VOICES.size - 1 else 10
         currentSpeakerId = currentSpeakerId.coerceIn(0, max)
     }
     
@@ -251,6 +275,7 @@ class MainActivity : AppCompatActivity() {
             .putInt(PREF_SPEAKER_ID, currentSpeakerId)
             .putFloat(PREF_SPEECH_SPEED, currentSpeed)
             .putBoolean(PREF_USE_CLOUD, useCloud)
+            .putInt(PREF_VOICE_CONFIG_VERSION, VOICE_CONFIG_VERSION)
             .apply()
     }
     
@@ -289,20 +314,53 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
     
-    private fun triggerTestRead() {
-        // This function's logic has been moved into setupClickListeners for btnTestRead
-        // and now directly interacts with the service via ACTION_TOGGLE_READ.
-        // The MediaProjection permission logic is removed.
-    }
-    
     private fun triggerTestVoice() {
+        val service = screenSenseService
+        if (service == null) {
+            Toast.makeText(this, R.string.voice_service_starting, Toast.LENGTH_SHORT).show()
+            bindToService()
+            return
+        }
+
         // Cancel any ongoing speech first
-        screenSenseService?.cancelScreenRead()
-        
-        // Speak test sample with voice name
-        val voiceName = screenSenseService?.getVoiceName(currentSpeakerId) ?: "Voice ${currentSpeakerId + 1}"
-        val sampleText = getString(R.string.test_voice_sample, voiceName, currentSpeed)
-        screenSenseService?.speakText(sampleText)
+        service.cancelScreenRead()
+
+        val customText = binding.customVoiceText.text?.toString()?.trim().orEmpty()
+        val textToSpeak = if (customText.isNotEmpty()) {
+            customText
+        } else {
+            val voiceName = service.getVoiceName(currentSpeakerId)
+            getString(R.string.test_voice_sample, voiceName, currentSpeed)
+        }
+
+        binding.customVoiceText.clearFocus()
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(binding.customVoiceText.windowToken, 0)
+        service.speakText(textToSpeak)
+    }
+
+    private fun downloadLastVoiceGeneration() {
+        val service = screenSenseService
+        if (service == null) {
+            Toast.makeText(this, R.string.voice_service_starting, Toast.LENGTH_SHORT).show()
+            bindToService()
+            return
+        }
+
+        binding.btnDownloadVoice.isEnabled = false
+        lifecycleScope.launch {
+            try {
+                val fileName = service.downloadLastVoiceGeneration()
+                val message = if (fileName != null) {
+                    getString(R.string.voice_download_saved, fileName)
+                } else {
+                    getString(R.string.voice_download_missing)
+                }
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+            } finally {
+                binding.btnDownloadVoice.isEnabled = true
+            }
+        }
     }
     
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -378,5 +436,10 @@ class MainActivity : AppCompatActivity() {
         // Update voice settings labels
         updateSpeakerLabel()
         updateSpeedLabel()
+        binding.ttsProviderInfo.text = if (useCloud) {
+            "TTS: Sam Voice (Titan)"
+        } else {
+            "TTS: Kokoro (Local)"
+        }
 }
 }

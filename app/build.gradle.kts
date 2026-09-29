@@ -1,5 +1,6 @@
 import java.util.Properties
 import java.io.FileInputStream
+import java.io.File
 
 plugins {
     id("com.android.application")
@@ -22,14 +23,34 @@ android {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
         }
 
-        // Read API Key from local.properties
+        // OpenAI-compatible Sam voice service on Titan. A local token file
+        // keeps the credential out of source control and local.properties.
         val localProperties = Properties()
         val localPropertiesFile = rootProject.file("local.properties")
         if (localPropertiesFile.exists()) {
             localProperties.load(FileInputStream(localPropertiesFile))
         }
-        val openAiKey = localProperties.getProperty("OPENAI_API_KEY") ?: ""
-        buildConfigField("String", "OPENAI_API_KEY", "\"$openAiKey\"")
+        val ttsBaseUrl = localProperties.getProperty("SAM_TTS_BASE_URL")
+            ?: System.getenv("SAM_TTS_BASE_URL")
+            ?: "http://100.90.131.29:8792/v1"
+        val defaultTokenFile = File(
+            System.getProperty("user.home"),
+            "keys/voxcpm.speech.prod.v1"
+        )
+        val tokenFile = localProperties.getProperty("SAM_TTS_TOKEN_FILE")
+            ?.let(::File)
+            ?: System.getenv("SAM_TTS_TOKEN_FILE")?.let(::File)
+            ?: defaultTokenFile
+        val ttsApiKey = localProperties.getProperty("SAM_TTS_API_KEY")
+            ?: System.getenv("SAM_TTS_API_KEY")
+            ?: tokenFile.takeIf { it.isFile }?.readText()?.trim()
+            ?: ""
+
+        fun buildConfigString(value: String): String =
+            "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
+        buildConfigField("String", "SAM_TTS_BASE_URL", buildConfigString(ttsBaseUrl))
+        buildConfigField("String", "SAM_TTS_API_KEY", buildConfigString(ttsApiKey))
     }
 
     buildTypes {

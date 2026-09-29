@@ -58,9 +58,9 @@ class ScreenSenseService : Service() {
     private lateinit var visionProvider: VisionProvider
     private lateinit var ttsProvider: TTSProvider
     
-    private lateinit var localTtsProvider: KokoroTTSProvider
+    private var localTtsProvider: KokoroTTSProvider? = null
     private lateinit var cloudTtsProvider: OpenAITTSProvider
-    private var useCloud = false
+    private var useCloud = true
     
     private var toneGenerator: ToneGenerator? = null
     
@@ -94,9 +94,8 @@ class ScreenSenseService : Service() {
         screenCapture = ScreenCapture(this)
         visionProvider = MLKitVisionProvider(this)
         
-        localTtsProvider = KokoroTTSProvider(this)
         cloudTtsProvider = OpenAITTSProvider(this)
-        ttsProvider = localTtsProvider
+        ttsProvider = cloudTtsProvider
         
         try {
             toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
@@ -295,13 +294,15 @@ class ScreenSenseService : Service() {
     }
     
     fun setUseCloud(cloud: Boolean) {
+        if (useCloud == cloud && ::ttsProvider.isInitialized) return
+        ttsProvider.stop()
         useCloud = cloud
-        ttsProvider = if (useCloud) cloudTtsProvider else localTtsProvider
+        ttsProvider = if (useCloud) {
+            cloudTtsProvider
+        } else {
+            localTtsProvider ?: KokoroTTSProvider(this).also { localTtsProvider = it }
+        }
         Log.d(TAG, "Switched to ${ttsProvider.getProviderName()}")
-    }
-    
-    fun setOpenAIApiKey(key: String) {
-        cloudTtsProvider.setApiKey(key)
     }
     
     /**
@@ -323,7 +324,9 @@ class ScreenSenseService : Service() {
     fun setSpeaker(id: Int) {
         when (val provider = ttsProvider) {
             is KokoroTTSProvider -> provider.setSpeaker(id)
-            is OpenAITTSProvider -> provider.setVoice(OpenAITTSProvider.VOICES.getOrNull(id) ?: "alloy")
+            is OpenAITTSProvider -> provider.setVoice(
+                OpenAITTSProvider.VOICES.getOrNull(id)?.apiName ?: OpenAITTSProvider.VOICES.first().apiName
+            )
         }
     }
     
@@ -344,7 +347,7 @@ class ScreenSenseService : Service() {
     fun getVoiceName(id: Int): String {
         return when (val provider = ttsProvider) {
             is KokoroTTSProvider -> provider.getVoiceName(id)
-            is OpenAITTSProvider -> OpenAITTSProvider.VOICES.getOrNull(id) ?: "Voice $id"
+            is OpenAITTSProvider -> OpenAITTSProvider.VOICES.getOrNull(id)?.displayName ?: "Voice $id"
             else -> "Voice $id"
         }
     }
@@ -357,6 +360,13 @@ class ScreenSenseService : Service() {
             ttsProvider.speak(text)
         }
     }
+
+    /**
+     * Copy the exact last WAV returned by the Titan voice service into the
+     * user's shared Downloads/ScreenSense Voice Generations folder.
+     */
+    suspend fun downloadLastVoiceGeneration(): String? =
+        cloudTtsProvider.saveLastGenerationToDownloads()
     
     private fun createNotification(): Notification {
         val pendingIntent = PendingIntent.getActivity(
@@ -387,9 +397,8 @@ class ScreenSenseService : Service() {
         serviceScope.cancel()
         screenCapture.release()
         visionProvider.release()
-        localTtsProvider.release()
+        localTtsProvider?.release()
         cloudTtsProvider.release()
         toneGenerator?.release()
     }
 }
-

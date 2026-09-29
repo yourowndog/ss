@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <!-- Titan is reachable only over the encrypted Brokentooth tailnet. -->
+    <!-- Sisyphus (current TTS endpoint) same tailnet constraint. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">100.104.232.94</domain>
+        <domain includeSubdomains="false">100.90.131.29</domain>
+    </domain-config>
+</network-security-config>

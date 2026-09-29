@@ -1,5 +1,6 @@
 package com.screensense.service
 
+import android.annotation.SuppressLint
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
@@ -50,6 +51,7 @@ class ScreenSenseTile : TileService() {
     }
     
     @Suppress("DEPRECATION")
+    @SuppressLint("WrongConstant", "PrivateApi")
     private fun collapseQuickSettingsPanel() {
         // Use reflection to collapse the panel on newer Android versions
         try {

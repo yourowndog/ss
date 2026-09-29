@@ -25,7 +25,6 @@
                 android:layout_width="80dp"
                 android:layout_height="80dp"
                 android:src="@drawable/ic_screen_reader"
-                android:tint="@color/primary"
                 app:tint="@color/primary" />
 
             <TextView
@@ -176,7 +175,7 @@
 
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Files Access Permission Card (for local TTS model) -->
+        <!-- Files Access Permission Card (only for optional local TTS) -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -209,7 +208,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="Required for local TTS model"
+                        android:text="Only required for optional local Kokoro"
                         android:textColor="#888888"
                         android:textSize="14sp" />
 
@@ -271,15 +270,15 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Local (Kokoro)"
-                        android:checked="true" />
+                        android:text="Local (Kokoro)" />
 
                     <RadioButton
                         android:id="@+id/rbCloud"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Cloud (OpenAI)" />
+                        android:checked="true"
+                        android:text="Sam (Titan)" />
                 </RadioGroup>
 
             </LinearLayout>
@@ -348,14 +347,54 @@
                     android:value="1.0"
                     app:labelBehavior="gone" />
 
-                <!-- Test Voice Button -->
+                <!-- Custom voice test -->
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/customVoiceTextLayout"
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:hint="@string/custom_voice_test_hint"
+                    app:counterEnabled="true"
+                    app:counterMaxLength="4096"
+                    app:helperText="@string/custom_voice_test_helper">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/customVoiceText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="top|start"
+                        android:inputType="textCapSentences|textMultiLine"
+                        android:maxLength="4096"
+                        android:maxLines="18"
+                        android:minLines="9"
+                        android:scrollbars="vertical" />
+
+                </com.google.android.material.textfield.TextInputLayout>
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnTestVoice"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginTop="12dp"
                     android:text="@string/btn_test_voice"
                     style="@style/Widget.Material3.Button.OutlinedButton" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDownloadVoice"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/btn_download_voice" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/voice_download_location"
+                    android:textColor="#888888"
+                    android:textSize="12sp" />
 
             </LinearLayout>
 
@@ -450,7 +489,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="TTS: Piper (libritts_r-medium, 904 speakers)"
+                android:text="TTS: Sam Voice (Titan)"
                 android:textColor="#888888"
                 android:textSize="12sp" />
 

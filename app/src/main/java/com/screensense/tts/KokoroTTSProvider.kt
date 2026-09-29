@@ -53,39 +53,28 @@ class KokoroTTSProvider(private val context: Context) : TTSProvider {
     @Volatile
     private var isSpeakingFlag = false
     
-    init {
-        initializeTts()
-    }
-    
-    private fun initializeTts() {
+    @Synchronized
+    private fun initializeTts(): Boolean {
+        if (isInitialized) return true
+
         try {
             val modelDir = getModelDirectory()
             if (modelDir == null) {
                 Log.e(TAG, "Model directory not found. Please ADB push kokoro-en-v0_19 to /sdcard/ScreenSense/")
-                return
+                return false
             }
             
             val modelPath = File(modelDir, "model.onnx")
             val voicesPath = File(modelDir, "voices.bin")
             val tokensPath = File(modelDir, "tokens.txt")
             val dataDir = File(modelDir, "espeak-ng-data")
-            
-            // Verify files exist with granular logging
-            if (!modelPath.exists()) {
-                Log.e(TAG, "MISSING: Model file at ${modelPath.absolutePath}")
-                return
-            }
-            if (!voicesPath.exists()) {
-                Log.e(TAG, "MISSING: Voices file at ${voicesPath.absolutePath}")
-                return
-            }
-            if (!tokensPath.exists()) {
-                Log.e(TAG, "MISSING: Tokens file at ${tokensPath.absolutePath}")
-                return
-            }
-            if (!dataDir.exists()) {
-                Log.e(TAG, "MISSING: espeak-ng-data directory at ${dataDir.absolutePath}")
-                return
+
+            val missing = missingRequiredPaths(modelDir)
+            if (missing.isNotEmpty()) {
+                // sherpa-onnx terminates the process on an invalid Kokoro
+                // config, so never cross the JNI boundary until preflight passes.
+                Log.e(TAG, "Local Kokoro model is incomplete; missing ${missing.joinToString { it.name }}")
+                return false
             }
             
             Log.d(TAG, "All Kokoro files found. Initializing model from: ${modelDir.absolutePath}")
@@ -108,10 +97,12 @@ class KokoroTTSProvider(private val context: Context) : TTSProvider {
             tts = OfflineTts(assetManager = null, config = config)
             isInitialized = true
             Log.d(TAG, "Kokoro TTS initialized successfully with ${tts?.numSpeakers() ?: 0} speakers")
+            return true
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize Kokoro TTS", e)
             isInitialized = false
+            return false
         }
     }
     
@@ -133,9 +124,25 @@ class KokoroTTSProvider(private val context: Context) : TTSProvider {
         Log.w(TAG, "Kokoro model not found. Checked: ${kokoroDir.absolutePath}, ${filesDir.absolutePath}")
         return null
     }
+
+    private fun missingRequiredPaths(modelDir: File): List<File> {
+        val dataDir = File(modelDir, "espeak-ng-data")
+        return listOf(
+            File(modelDir, "model.onnx"),
+            File(modelDir, "voices.bin"),
+            File(modelDir, "tokens.txt"),
+            dataDir,
+            File(dataDir, "intonations"),
+            File(dataDir, "phondata"),
+            File(dataDir, "phonindex"),
+            File(dataDir, "phontab"),
+            File(dataDir, "en_dict")
+        ).filterNot { it.exists() }
+    }
     
     override suspend fun speak(text: String) {
-        if (!isInitialized || text.isBlank()) {
+        if (text.isBlank()) return
+        if (!initializeTts()) {
             Log.w(TAG, "Cannot speak: initialized=$isInitialized, text blank=${text.isBlank()}")
             return
         }
@@ -270,7 +277,8 @@ class KokoroTTSProvider(private val context: Context) : TTSProvider {
     
     override fun getProviderName(): String = "Kokoro (kokoro-en-v0_19)"
     
-    override fun isReady(): Boolean = isInitialized
+    override fun isReady(): Boolean = isInitialized ||
+        getModelDirectory()?.let { missingRequiredPaths(it).isEmpty() } == true
     
     override fun release() {
         audioTrack?.release()

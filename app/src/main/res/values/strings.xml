@@ -29,6 +29,13 @@
     <string name="voice_settings_section">Voice Settings</string>
     <string name="voice_speaker_label">Voice (%1$d of %2$d)</string>
     <string name="voice_speed_label">Speed (%1$.1fx)</string>
-    <string name="btn_test_voice">Test Voice</string>
+    <string name="custom_voice_test_hint">Text to speak</string>
+    <string name="custom_voice_test_helper">Type anything, or leave blank for the built-in sample.</string>
+    <string name="btn_test_voice">Speak Custom Text</string>
+    <string name="btn_download_voice">Download Last WAV</string>
+    <string name="voice_download_location">Saves to Downloads/ScreenSense Voice Generations</string>
+    <string name="voice_download_saved">Saved %1$s to ScreenSense Voice Generations in Downloads.</string>
+    <string name="voice_download_missing">Nothing to download yet. Generate speech and wait for it to begin, then try again.</string>
+    <string name="voice_service_starting">Voice service is still starting. Try again in a moment.</string>
     <string name="test_voice_sample">Hello! This is %1$s speaking at %2$.1f times normal speed. Screen Sense uses advanced neural text to speech to read your screen content clearly. The quick brown fox jumps over the lazy dog.</string>
 </resources>

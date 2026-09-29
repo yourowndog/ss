@@ -1,63 +1,78 @@
 package com.screensense.tts
 
+import android.content.ContentValues
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.io.IOException
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * Cloud TTS provider using OpenAI's API.
- * 
- * Supports voices: alloy, echo, fable, onyx, nova, shimmer.
- * Requires an API key. Uses 16-bit PCM at 24kHz.
+ * OpenAI-compatible TTS provider for Sam's voice service on Titan.
  */
 class OpenAITTSProvider(private val context: Context) : TTSProvider {
 
     companion object {
         private const val TAG = "OpenAITTSProvider"
-        private const val API_URL = "https://api.openai.com/v1/audio/speech"
-        
-        val VOICES = listOf("Alloy", "Echo", "Fable", "Onyx", "Nova", "Shimmer")
+        private const val MAX_RESPONSE_BYTES = 64L * 1024L * 1024L
+        private const val DOWNLOAD_FOLDER = "ScreenSense Voice Generations"
+        private const val LAST_GENERATION_FILE = "last_voice_generation.wav"
+
+        data class Voice(val apiName: String, val displayName: String)
+
+        val VOICES = listOf(
+            Voice("sam", "Sam"),
+            Voice("sam-bright", "Sam Bright")
+        )
     }
 
-    // Use key from BuildConfig (injected from local.properties)
-    private var apiKey: String = com.screensense.BuildConfig.OPENAI_API_KEY
-    private var voice: String = "alloy"
+    private val apiUrl =
+        "${com.screensense.BuildConfig.SAM_TTS_BASE_URL.trimEnd('/')}/audio/speech"
+    private val apiKey: String = com.screensense.BuildConfig.SAM_TTS_API_KEY
+    private var voice: String = VOICES.first().apiName
     private var speed: Float = 1.0f
     private var audioTrack: AudioTrack? = null
+    private val generationLock = Any()
     
     @Volatile
     private var isSpeakingFlag = false
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        // A cold VoxCPM load takes about 170 seconds; warm calls take ~14.
+        .readTimeout(5, TimeUnit.MINUTES)
         .writeTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    fun setApiKey(key: String) {
-        apiKey = key
-    }
-
     fun setVoice(voiceName: String) {
-        // OpenAI API expects lowercase voice names
-        val lowerName = voiceName.lowercase()
-        if (VOICES.any { it.lowercase() == lowerName }) {
-            voice = lowerName
+        val requested = voiceName.lowercase()
+        if (VOICES.any { it.apiName == requested }) {
+            voice = requested
         }
     }
 
+    @Volatile
     private var currentCall: Call? = null
 
     override suspend fun speak(text: String) {
-        if (apiKey.isBlank()) {
-            Log.e(TAG, "API key is missing")
+        if (apiUrl.isBlank() || apiKey.isBlank()) {
+            Log.e(TAG, "Sam voice service is not configured")
             return
         }
 
@@ -66,21 +81,18 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
         stop() // Ensure previous playback/request is stopped
         isSpeakingFlag = true
         
-        val mediaType = "application/json".toMediaType()
-        val json = """
-            {
-                "model": "tts-1",
-                "voice": "$voice",
-                "input": ${escapeJson(text)},
-                "speed": $speed,
-                "response_format": "pcm"
-            }
-        """.trimIndent()
+        val json = JSONObject()
+            .put("model", "voxcpm2-sam-v3")
+            .put("voice", voice)
+            .put("input", text)
+            .put("speed", speed)
+            .put("response_format", "wav")
+            .toString()
 
         val request = Request.Builder()
-            .url(API_URL)
+            .url(apiUrl)
             .addHeader("Authorization", "Bearer $apiKey")
-            .post(json.toRequestBody(mediaType))
+            .post(json.toRequestBody("application/json".toMediaType()))
             .build()
             
         val call = client.newCall(request)
@@ -93,34 +105,112 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
                     return
                 }
                 Log.e(TAG, "Request failed", e)
-                isSpeakingFlag = false
+                finishCall(call)
             }
 
             override fun onResponse(call: Call, response: Response) {
-                if (call.isCanceled()) return
-                
-                if (!response.isSuccessful) {
-                    val error = response.body?.string()
-                    Log.e(TAG, "API Error: ${response.code} - $error")
-                    isSpeakingFlag = false
-                    return
-                }
+                response.use {
+                    if (call.isCanceled() || currentCall !== call) return
 
-                val bytes = response.body?.bytes()
-                if (bytes != null) {
-                    // Check cancellation one last time before playing
-                    if (!isSpeakingFlag) return
-                    playPcm(bytes)
-                } else {
-                    isSpeakingFlag = false
+                    if (!it.isSuccessful) {
+                        val error = it.body?.string()?.take(200)
+                        Log.e(TAG, "Sam voice service error: ${it.code} - $error")
+                        finishCall(call)
+                        return
+                    }
+
+                    val body = it.body
+                    val contentLength = body?.contentLength() ?: -1L
+                    if (body == null || contentLength > MAX_RESPONSE_BYTES) {
+                        Log.e(TAG, "Invalid or oversized audio response")
+                        finishCall(call)
+                        return
+                    }
+
+                    try {
+                        val wavBytes = body.bytes()
+                        val wav = decodePcmWav(wavBytes)
+                        if (!isSpeakingFlag || currentCall !== call) return
+                        cacheGeneratedWav(wavBytes)
+                        playPcm(wav.pcm, wav.sampleRate, call)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Invalid WAV response", e)
+                        finishCall(call)
+                    }
                 }
             }
         })
     }
 
-    private fun playPcm(bytes: ByteArray) {
-        // 24kHz, Mono, 16-bit PCM (as per OpenAI pcm response_format)
-        val sampleRate = 24000
+    /**
+     * Save the exact WAV returned by Titan for the most recent successful
+     * generation. MediaStore places it in shared Downloads without needing
+     * broad storage permission on Android 10+.
+     */
+    suspend fun saveLastGenerationToDownloads(): String? = withContext(Dispatchers.IO) {
+        val cachedWav = File(context.cacheDir, LAST_GENERATION_FILE)
+        synchronized(generationLock) {
+            if (!cachedWav.isFile || cachedWav.length() == 0L) return@withContext null
+        }
+
+        val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+        val fileName = "ScreenSense_$timestamp.wav"
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+            put(MediaStore.Downloads.MIME_TYPE, "audio/wav")
+            put(
+                MediaStore.Downloads.RELATIVE_PATH,
+                "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER"
+            )
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return@withContext null
+
+        try {
+            resolver.openOutputStream(destination)?.use { output ->
+                synchronized(generationLock) {
+                    if (!cachedWav.isFile || cachedWav.length() == 0L) {
+                        throw IOException("Cached generation is unavailable")
+                    }
+                    cachedWav.inputStream().use { input -> input.copyTo(output) }
+                }
+            } ?: throw IOException("Unable to open shared Downloads destination")
+
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(destination, values, null, null)
+            fileName
+        } catch (e: Exception) {
+            resolver.delete(destination, null, null)
+            Log.e(TAG, "Failed to save generated WAV", e)
+            null
+        }
+    }
+
+    private fun cacheGeneratedWav(bytes: ByteArray) {
+        val cacheFile = File(context.cacheDir, LAST_GENERATION_FILE)
+        val temporaryFile = File(context.cacheDir, "$LAST_GENERATION_FILE.tmp")
+
+        try {
+            temporaryFile.writeBytes(bytes)
+            synchronized(generationLock) {
+                if (cacheFile.exists() && !cacheFile.delete()) {
+                    throw IOException("Unable to replace cached generation")
+                }
+                if (!temporaryFile.renameTo(cacheFile)) {
+                    temporaryFile.copyTo(cacheFile, overwrite = true)
+                    temporaryFile.delete()
+                }
+            }
+        } catch (e: Exception) {
+            temporaryFile.delete()
+            Log.e(TAG, "Failed to cache generated WAV", e)
+        }
+    }
+
+    private fun playPcm(bytes: ByteArray, sampleRate: Int, call: Call) {
         val bufferSize = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
@@ -150,15 +240,78 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
             audioTrack?.setNotificationMarkerPosition(bytes.size / 2) // pcm_16bit is 2 bytes per sample
             audioTrack?.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
                 override fun onMarkerReached(track: AudioTrack?) {
-                    isSpeakingFlag = false
+                    if (audioTrack === track) {
+                        finishCall(call)
+                        track?.release()
+                        audioTrack = null
+                    }
                 }
                 override fun onPeriodicNotification(track: AudioTrack?) {}
             })
 
-            audioTrack?.write(bytes, 0, bytes.size)
+            val written = audioTrack?.write(bytes, 0, bytes.size) ?: -1
+            if (written < 0) throw IOException("AudioTrack write failed: $written")
             audioTrack?.play()
         } catch (e: Exception) {
-            Log.e(TAG, "Error playing PCM", e)
+            Log.e(TAG, "Error playing Sam voice audio", e)
+            finishCall(call)
+        }
+    }
+
+    private data class PcmWav(val sampleRate: Int, val pcm: ByteArray)
+
+    private fun decodePcmWav(bytes: ByteArray): PcmWav {
+        require(bytes.size >= 44 && ascii(bytes, 0) == "RIFF" && ascii(bytes, 8) == "WAVE") {
+            "Not a RIFF/WAVE file"
+        }
+
+        var sampleRate = 0
+        var channels = 0
+        var bitsPerSample = 0
+        var audioFormat = 0
+        var pcm: ByteArray? = null
+        var offset = 12
+
+        while (offset + 8 <= bytes.size) {
+            val chunkId = ascii(bytes, offset)
+            val chunkSize = littleEndianInt(bytes, offset + 4)
+            val dataOffset = offset + 8
+            require(chunkSize >= 0 && dataOffset + chunkSize <= bytes.size) { "Invalid WAV chunk" }
+
+            when (chunkId) {
+                "fmt " -> {
+                    require(chunkSize >= 16) { "Invalid WAV format chunk" }
+                    val buffer = ByteBuffer.wrap(bytes, dataOffset, chunkSize)
+                        .order(ByteOrder.LITTLE_ENDIAN)
+                    audioFormat = buffer.short.toInt() and 0xffff
+                    channels = buffer.short.toInt() and 0xffff
+                    sampleRate = buffer.int
+                    buffer.int // byte rate
+                    buffer.short // block alignment
+                    bitsPerSample = buffer.short.toInt() and 0xffff
+                }
+                "data" -> pcm = bytes.copyOfRange(dataOffset, dataOffset + chunkSize)
+            }
+
+            offset = dataOffset + chunkSize + (chunkSize and 1)
+        }
+
+        require(audioFormat == 1 && channels == 1 && bitsPerSample == 16) {
+            "Expected mono 16-bit PCM WAV"
+        }
+        require(sampleRate in 8_000..192_000) { "Invalid WAV sample rate" }
+        return PcmWav(sampleRate, requireNotNull(pcm) { "WAV data chunk missing" })
+    }
+
+    private fun ascii(bytes: ByteArray, offset: Int): String =
+        String(bytes, offset, 4, Charsets.US_ASCII)
+
+    private fun littleEndianInt(bytes: ByteArray, offset: Int): Int =
+        ByteBuffer.wrap(bytes, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
+
+    private fun finishCall(call: Call) {
+        if (currentCall === call) {
+            currentCall = null
             isSpeakingFlag = false
         }
     }
@@ -187,9 +340,9 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
         // Not supported by OpenAI TTS API directly via simple param
     }
 
-    override fun getProviderName(): String = "OpenAI Cloud TTS"
+    override fun getProviderName(): String = "Sam Voice (Titan)"
 
-    override fun isReady(): Boolean = apiKey.isNotBlank()
+    override fun isReady(): Boolean = apiUrl.isNotBlank() && apiKey.isNotBlank()
 
     override fun release() {
         stop()
@@ -198,12 +351,4 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
 
     fun isSpeaking(): Boolean = isSpeakingFlag
 
-    private fun escapeJson(text: String): String {
-        return text.replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
-            .let { "\"$it\"" }
-    }
 }

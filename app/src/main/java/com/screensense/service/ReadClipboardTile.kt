@@ -7,7 +7,7 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
 import com.screensense.R
-import com.screensense.tts.PiperTTSProvider
+import com.screensense.tts.OpenAITTSProvider
 import com.screensense.tts.TTSProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,11 +68,11 @@ class ReadClipboardTile : TileService() {
             return
         }
         
-        Log.d(TAG, "Reading clipboard: ${text.take(50)}...")
+        Log.d(TAG, "Reading ${text.length} clipboard characters")
         
         // Initialize TTS if needed
         if (ttsProvider == null) {
-            ttsProvider = PiperTTSProvider(applicationContext)
+            ttsProvider = OpenAITTSProvider(applicationContext)
         }
         
         if (ttsProvider?.isReady() != true) {
