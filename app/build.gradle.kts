@@ -32,7 +32,7 @@ android {
         }
         val ttsBaseUrl = localProperties.getProperty("SAM_TTS_BASE_URL")
             ?: System.getenv("SAM_TTS_BASE_URL")
-            ?: "http://100.90.131.29:8792/v1"
+            ?: "https://sisyphus.chronicle-procyon.ts.net/v1"
         val defaultTokenFile = File(
             System.getProperty("user.home"),
             "keys/voxcpm.speech.prod.v1"
