@@ -31,6 +31,9 @@ import kotlinx.coroutines.*
  * - Permission grant -> IMMEDIATELY start capture session
  * - VirtualDisplay created right away, not on-demand
  * - capture() reads from the running stream
+ *
+ * Also hosts a loopback-only HTTP control surface (127.0.0.1) for Zepp Side Service
+ * to trigger TTS of assistant messages without exporting any remote component.
  */
 class ScreenSenseService : Service() {
     
@@ -38,14 +41,19 @@ class ScreenSenseService : Service() {
         private const val TAG = "ScreenSenseService"
         private const val NOTIFICATION_ID = 1
         
+        // Default HTTP control port; override via local.properties TTS_HTTP_PORT
+        const val TTS_HTTP_PORT = 9987
+        
         // Actions
         const val ACTION_START_PROJECTION = "com.screensense.START_PROJECTION"
         const val ACTION_CAPTURE_FRAME = "com.screensense.CAPTURE_FRAME"
         const val ACTION_TOGGLE_READ = "com.screensense.TOGGLE_READ"
+        const val ACTION_SPEAK_TEXT = "com.screensense.SPEAK_TEXT"
         const val ACTION_STOP = "com.screensense.STOP"
         
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
+        const val EXTRA_SPEAK_TEXT = "extra_speak_text"
         
         @Volatile
         var instance: ScreenSenseService? = null
@@ -65,6 +73,8 @@ class ScreenSenseService : Service() {
     private var toneGenerator: ToneGenerator? = null
     
     private var readingJob: Job? = null
+    
+    private var ttsHttpServer: TtsHttpServer? = null
     
     /**
      * Check if currently reading (either processing or speaking).
@@ -102,6 +112,9 @@ class ScreenSenseService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create ToneGenerator", e)
         }
+
+        // Start the loopback TTS HTTP server for Zepp Side Service
+        startTtsHttpServer()
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -156,6 +169,16 @@ class ScreenSenseService : Service() {
                 } else {
                     Log.d(TAG, "Toggle: Starting screen read")
                     triggerScreenRead()
+                }
+            }
+
+            ACTION_SPEAK_TEXT -> {
+                val text = intent.getStringExtra(EXTRA_SPEAK_TEXT)
+                if (!text.isNullOrBlank()) {
+                    Log.d(TAG, "Speak text: ${text.take(80)}...")
+                    speakText(text)
+                } else {
+                    Log.w(TAG, "SPEAK_TEXT intent with no text")
                 }
             }
             
@@ -353,13 +376,38 @@ class ScreenSenseService : Service() {
     }
     
     /**
-     * Speak arbitrary text (for test voice).
+     * Speak arbitrary text (for test voice / Zepp TTS).
      */
     fun speakText(text: String) {
         serviceScope.launch {
             ttsProvider.speak(text)
         }
     }
+
+    /**
+     * Start the loopback HTTP server for Zepp Side Service control.
+     * Binds to 127.0.0.1 only — never exported.
+     */
+    private fun startTtsHttpServer() {
+        val httpPort = try {
+            com.screensense.BuildConfig.TTS_HTTP_PORT
+        } catch (e: Exception) {
+            TTS_HTTP_PORT
+        }
+        val server = TtsHttpServer(httpPort) { text ->
+            speakText(text)
+        }
+        server.start()
+        ttsHttpServer = server
+        val actualPort = server.actualPort
+        Log.d(TAG, "TTS HTTP server bound to 127.0.0.1:$actualPort")
+    }
+
+    /**
+     * Return the port the TTS HTTP server is actually listening on
+     * (may differ from TTS_HTTP_PORT if the configured port was busy).
+     */
+    fun getTtsHttpPort(): Int = ttsHttpServer?.actualPort ?: -1
 
     /**
      * Copy the exact last WAV returned by the Titan voice service into the
@@ -394,6 +442,8 @@ class ScreenSenseService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        ttsHttpServer?.stop()
+        ttsHttpServer = null
         serviceScope.cancel()
         screenCapture.release()
         visionProvider.release()

@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Environment
 import android.provider.MediaStore
@@ -52,6 +53,22 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
     
     @Volatile
     private var isSpeakingFlag = false
+
+    private var audioFocusRequested = false
+    private val audioManager: AudioManager? by lazy {
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    }
+
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                Log.d(TAG, "Audio focus lost, stopping speech")
+                abandonAudioFocus()
+                stop()
+            }
+        }
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -189,6 +206,29 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
         }
     }
 
+    private fun requestAudioFocus(): Boolean {
+        audioManager?.let { am ->
+            val result = am.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+            )
+            audioFocusRequested = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            if (!audioFocusRequested) {
+                Log.w(TAG, "Audio focus request denied: $result")
+            }
+            return audioFocusRequested
+        }
+        return false
+    }
+
+    private fun abandonAudioFocus() {
+        if (audioFocusRequested) {
+            audioManager?.abandonAudioFocus(audioFocusChangeListener)
+            audioFocusRequested = false
+        }
+    }
+
     private fun cacheGeneratedWav(bytes: ByteArray) {
         val cacheFile = File(context.cacheDir, LAST_GENERATION_FILE)
         val temporaryFile = File(context.cacheDir, "$LAST_GENERATION_FILE.tmp")
@@ -211,6 +251,8 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
     }
 
     private fun playPcm(bytes: ByteArray, sampleRate: Int, call: Call) {
+        requestAudioFocus()
+
         val bufferSize = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
@@ -314,6 +356,7 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
             currentCall = null
             isSpeakingFlag = false
         }
+        abandonAudioFocus()
     }
 
     override fun stop() {
@@ -322,7 +365,7 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
         currentCall = null
         
         try {
-            audioTrack?.pause() // Pause immediately
+            audioTrack?.pause()
             audioTrack?.flush()
             audioTrack?.stop()
             audioTrack?.release()
@@ -330,6 +373,7 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
             Log.w(TAG, "Error stopping audio", e)
         }
         audioTrack = null
+        abandonAudioFocus()
     }
 
     override fun setSpeed(speed: Float) {

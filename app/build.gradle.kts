@@ -51,6 +51,11 @@ android {
 
         buildConfigField("String", "SAM_TTS_BASE_URL", buildConfigString(ttsBaseUrl))
         buildConfigField("String", "SAM_TTS_API_KEY", buildConfigString(ttsApiKey))
+
+        val ttsHttpPort = localProperties.getProperty("TTS_HTTP_PORT")
+            ?: System.getenv("TTS_HTTP_PORT")
+            ?: "9987"
+        buildConfigField("int", "TTS_HTTP_PORT", ttsHttpPort)
     }
 
     buildTypes {
