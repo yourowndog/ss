@@ -16,6 +16,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.io.InputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -25,7 +26,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * OpenAI-compatible TTS provider for Sam's voice service on Titan.
+ * OpenAI-compatible TTS provider for Sam's voice service on Sisyphus.
  */
 class OpenAITTSProvider(private val context: Context) : TTSProvider {
 
@@ -45,6 +46,8 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
 
     private val apiUrl =
         "${com.screensense.BuildConfig.SAM_TTS_BASE_URL.trimEnd('/')}/audio/speech"
+    private val streamApiUrl =
+        "${com.screensense.BuildConfig.SAM_TTS_BASE_URL.trimEnd('/')}/audio/speech/stream"
     private val apiKey: String = com.screensense.BuildConfig.SAM_TTS_API_KEY
     private var voice: String = VOICES.first().apiName
     private var speed: Float = 1.0f
@@ -76,6 +79,73 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
         .readTimeout(5, TimeUnit.MINUTES)
         .writeTimeout(10, TimeUnit.SECONDS)
         .build()
+
+    suspend fun speakStreaming(text: String) {
+        if (streamApiUrl.isBlank() || apiKey.isBlank()) {
+            Log.e(TAG, "Sam streaming voice service is not configured")
+            return
+        }
+        if (text.isBlank()) return
+
+        stop()
+        isSpeakingFlag = true
+
+        val json = JSONObject()
+            .put("model", "voxcpm2-sam-v3")
+            .put("voice", voice)
+            .put("input", text)
+            .put("speed", 1.0)
+            .put("response_format", "pcm")
+            .toString()
+
+        val request = Request.Builder()
+            .url(streamApiUrl)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .post(json.toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val call = client.newCall(request)
+        currentCall = call
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (call.isCanceled()) {
+                    Log.d(TAG, "Streaming request cancelled")
+                    return
+                }
+                Log.e(TAG, "Streaming request failed", e)
+                finishCall(call)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    if (call.isCanceled() || currentCall !== call) return
+                    if (!it.isSuccessful) {
+                        val error = it.body?.string()?.take(200)
+                        Log.e(TAG, "Sam streaming service error: " + it.code + " - " + error)
+                        finishCall(call)
+                        return
+                    }
+
+                    val sampleRate = it.header("X-Sample-Rate")
+                        ?.toIntOrNull()
+                        ?: 48000
+                    val body = it.body
+                    if (body == null) {
+                        Log.e(TAG, "Sam streaming response had no body")
+                        finishCall(call)
+                        return
+                    }
+
+                    try {
+                        playPcmStream(body.byteStream(), sampleRate, call)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error streaming Sam voice audio", e)
+                        finishCall(call)
+                    }
+                }
+            }
+        })
+    }
 
     fun setVoice(voiceName: String) {
         val requested = voiceName.lowercase()
@@ -160,7 +230,7 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
     }
 
     /**
-     * Save the exact WAV returned by Titan for the most recent successful
+     * Save the exact WAV returned by Sisyphus for the most recent successful
      * generation. MediaStore places it in shared Downloads without needing
      * broad storage permission on Android 10+.
      */
@@ -204,6 +274,109 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
             Log.e(TAG, "Failed to save generated WAV", e)
             null
         }
+    }
+
+    private fun playPcmStream(input: InputStream, sampleRate: Int, call: Call) {
+        requestAudioFocus()
+
+        val minBuffer = AudioTrack.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        val streamBuffer = maxOf(minBuffer * 2, sampleRate)
+
+        val track = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build()
+            )
+            .setBufferSizeInBytes(streamBuffer)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+
+        audioTrack?.release()
+        audioTrack = track
+
+        val readBuffer = ByteArray(32 * 1024)
+        val writeBuffer = ByteArray(readBuffer.size + 1)
+        var carry: Byte? = null
+        var started = false
+        var totalBytes = 0L
+
+        while (!call.isCanceled() && currentCall === call) {
+            val read = input.read(readBuffer)
+            if (read < 0) break
+            if (read == 0) continue
+
+            var outLen = 0
+            val saved = carry
+            if (saved != null) {
+                writeBuffer[0] = saved
+                outLen = 1
+                carry = null
+            }
+            System.arraycopy(readBuffer, 0, writeBuffer, outLen, read)
+            outLen += read
+
+            if ((outLen and 1) != 0) {
+                carry = writeBuffer[outLen - 1]
+                outLen -= 1
+            }
+            if (outLen == 0) continue
+
+            var offset = 0
+            while (offset < outLen) {
+                val written = track.write(writeBuffer, offset, outLen - offset)
+                if (written < 0) {
+                    throw IOException("AudioTrack streaming write failed: " + written)
+                }
+                offset += written
+                totalBytes += written.toLong()
+            }
+
+            if (!started) {
+                track.play()
+                started = true
+                Log.d(TAG, "Watch Sam stream playback started @ " + sampleRate + " Hz")
+            }
+        }
+
+        if (!started) {
+            throw IOException("Sam stream ended before audio arrived")
+        }
+
+        val targetFrames = totalBytes / 2L
+        val deadline = System.currentTimeMillis() + 30_000L
+        while (
+            !call.isCanceled() &&
+            currentCall === call &&
+            System.currentTimeMillis() < deadline
+        ) {
+            val played = track.playbackHeadPosition.toLong() and 0xffffffffL
+            if (played >= targetFrames) break
+            Thread.sleep(25)
+        }
+
+        if (audioTrack === track) {
+            try {
+                track.stop()
+            } catch (_: Exception) {
+            }
+            track.release()
+            audioTrack = null
+        }
+        Log.d(TAG, "Watch Sam stream complete: " + totalBytes + " PCM bytes")
+        finishCall(call)
     }
 
     private fun requestAudioFocus(): Boolean {
@@ -384,7 +557,7 @@ class OpenAITTSProvider(private val context: Context) : TTSProvider {
         // Not supported by OpenAI TTS API directly via simple param
     }
 
-    override fun getProviderName(): String = "Sam Voice (Titan)"
+    override fun getProviderName(): String = "Sam Voice (Sisyphus)"
 
     override fun isReady(): Boolean = apiUrl.isNotBlank() && apiKey.isNotBlank()
 

@@ -69,6 +69,7 @@ class ScreenSenseService : Service() {
     
     private var localTtsProvider: KokoroTTSProvider? = null
     private lateinit var cloudTtsProvider: OpenAITTSProvider
+    private lateinit var watchTtsProvider: OpenAITTSProvider
     private var useCloud = true
     
     private var toneGenerator: ToneGenerator? = null
@@ -106,6 +107,7 @@ class ScreenSenseService : Service() {
         visionProvider = MLKitVisionProvider(this)
         
         cloudTtsProvider = OpenAITTSProvider(this)
+        watchTtsProvider = OpenAITTSProvider(this)
         ttsProvider = cloudTtsProvider
         
         try {
@@ -404,8 +406,8 @@ class ScreenSenseService : Service() {
      */
     fun speakWatchText(text: String) {
         serviceScope.launch {
-            cloudTtsProvider.setVoice("sam")
-            cloudTtsProvider.speak(text)
+            watchTtsProvider.setVoice("sam")
+            watchTtsProvider.speakStreaming(text)
         }
     }
 
@@ -491,6 +493,7 @@ class ScreenSenseService : Service() {
         visionProvider.release()
         localTtsProvider?.release()
         cloudTtsProvider.release()
+        watchTtsProvider.release()
         toneGenerator?.release()
     }
 }
