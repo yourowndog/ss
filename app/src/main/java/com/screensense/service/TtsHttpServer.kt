@@ -108,8 +108,8 @@ class TtsHttpServer(
                     }
                 }
 
-                val responseBody: String
-                val statusLine: String
+                var responseBody: String
+                var statusLine: String
 
                 if (method == "POST" && path == "/speak") {
                     val body = if (contentLength > 0) {
