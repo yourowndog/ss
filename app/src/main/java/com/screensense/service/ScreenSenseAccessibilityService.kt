@@ -201,16 +201,9 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
         rootNode.recycle()
         
         // Sort by visual position: Top-to-Bottom, then Left-to-Right
-        textNodes.sortWith(Comparator { a, b ->
-            val rectA = a.second
-            val rectB = b.second
-            
-            if (kotlin.math.abs(rectA.top - rectB.top) > 40) {
-                rectA.top - rectB.top
-            } else {
-                rectA.left - rectB.left
-            }
-        })
+        // A fixed row bucket keeps the comparator transitive (pairwise tolerances do not).
+        textNodes.sortWith(compareBy<Pair<String, android.graphics.Rect>> { it.second.top / 40 }
+            .thenBy { it.second.left })
         
         val result = textNodes.joinToString(" ") { it.first }
         Log.d(TAG, "Collected ${textNodes.size} text nodes, total ${result.length} chars")

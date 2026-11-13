@@ -123,7 +123,7 @@ class TtsHttpServer(
                         val text = json.optString("text", "")
                         if (text.isNotBlank()) {
                             onSpeak(text)
-                            Log.d(TAG, "Spoke from HTTP: ${text.take(80)}...")
+                            Log.d(TAG, "Speech requested from HTTP: ${text.length} chars")
                             statusLine = "HTTP/1.1 200 OK"
                             responseBody = """{"status":"ok"}"""
                         } else {

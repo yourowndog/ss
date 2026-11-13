@@ -338,12 +338,12 @@ class ScreenSenseService : Service() {
      * Stop any ongoing speech.
      */
     fun stopSpeech() {
-        ttsProvider.stop()
+        cancelScreenRead()
     }
     
     fun setUseCloud(cloud: Boolean, device: Boolean = false) {
         if (useCloud == cloud && useDevice == device && ::ttsProvider.isInitialized) return
-        ttsProvider.stop()
+        cancelScreenRead()
         useCloud = cloud
         useDevice = device
         ttsProvider = if (useDevice) {

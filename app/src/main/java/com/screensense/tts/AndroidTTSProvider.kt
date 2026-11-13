@@ -1,6 +1,9 @@
 package com.screensense.tts
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -21,6 +24,15 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
         private const val TAG = "AndroidTTSProvider"
     }
     
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val attributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+    private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        .setAudioAttributes(attributes)
+        .setOnAudioFocusChangeListener { change ->
+            if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) stop()
+        }.build()
     private var tts: TextToSpeech? = null
     private var isInitialized = false
     private val initialized = CompletableDeferred<Boolean>()
@@ -35,6 +47,7 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
                     && result != TextToSpeech.LANG_NOT_SUPPORTED
                 
                 if (isInitialized) {
+                    tts?.setAudioAttributes(attributes)
                     tts?.setSpeechRate(speechSpeed)
                     tts?.setPitch(speechPitch)
                     Log.d(TAG, "TTS initialized successfully")
@@ -54,6 +67,9 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
         if (text.isBlank()) return
         check(withTimeout(5000L) { initialized.await() }) { "Android speech engine unavailable" }
         
+        check(audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            "Audio focus unavailable"
+        }
         suspendCancellableCoroutine { continuation ->
             val utteranceId = UUID.randomUUID().toString()
             
@@ -63,18 +79,25 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
                 override fun onDone(id: String?) {
                     Log.d(TAG, "Speech playback completed")
                     if (id == utteranceId && continuation.isActive) {
+                        audioManager.abandonAudioFocusRequest(focusRequest)
                         continuation.resume(Unit)
                     }
                 }
                 
+                override fun onStop(id: String?, interrupted: Boolean) {
+                    if (id == utteranceId && continuation.isActive) continuation.resume(Unit)
+                }
+
                 @Deprecated("Deprecated in Java")
                 override fun onError(id: String?) {
                     if (id == utteranceId && continuation.isActive) {
+                        audioManager.abandonAudioFocusRequest(focusRequest)
                         continuation.resume(Unit)
                     }
                 }
                 
                 override fun onError(id: String?, errorCode: Int) {
+                    audioManager.abandonAudioFocusRequest(focusRequest)
                     if (id == utteranceId && continuation.isActive) {
                         Log.e(TAG, "TTS error: $errorCode")
                         continuation.resume(Unit)
@@ -84,18 +107,20 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
             
             val result = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
             if (result != TextToSpeech.SUCCESS && continuation.isActive) {
+                audioManager.abandonAudioFocusRequest(focusRequest)
                 continuation.resume(Unit)
                 Log.e(TAG, "Speech engine rejected utterance: $result")
             }
             
             continuation.invokeOnCancellation {
-                tts?.stop()
+                stop()
             }
         }
     }
     
     override fun stop() {
         tts?.stop()
+        audioManager.abandonAudioFocusRequest(focusRequest)
     }
     
     override fun setSpeed(speed: Float) {
@@ -113,7 +138,7 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
     override fun isReady(): Boolean = isInitialized
     
     override fun release() {
-        tts?.stop()
+        stop()
         tts?.shutdown()
         tts = null
         isInitialized = false
