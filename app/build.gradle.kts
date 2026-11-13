@@ -9,7 +9,8 @@ plugins {
 
 android {
     namespace = "com.screensense"
-    compileSdk = 34
+    compileSdk = 35
+    buildToolsVersion = "35.0.1"
 
     defaultConfig {
         applicationId = "com.screensense"

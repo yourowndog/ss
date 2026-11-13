@@ -397,6 +397,7 @@ class ScreenSenseService : Service() {
      */
     fun getVoiceName(id: Int): String {
         return when (val provider = ttsProvider) {
+            is AndroidTTSProvider -> "Phone voice"
             is KokoroTTSProvider -> provider.getVoiceName(id)
             is OpenAITTSProvider -> OpenAITTSProvider.VOICES.getOrNull(id)?.displayName ?: "Voice $id"
             else -> "Voice $id"
@@ -407,8 +408,14 @@ class ScreenSenseService : Service() {
      * Speak arbitrary text (for test voice / Zepp TTS).
      */
     fun speakText(text: String) {
-        serviceScope.launch {
-            ttsProvider.speak(text)
+        cancelScreenRead()
+        readingJob = serviceScope.launch {
+            try { ttsProvider.speak(text) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                Log.e(TAG, "Speech failed", e)
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_NACK, 200)
+            }
         }
     }
 
