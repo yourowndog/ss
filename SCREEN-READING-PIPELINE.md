@@ -69,3 +69,7 @@ Build on Sisyphus in build.slice; Sleeper coordinates. Multiple sessions were ac
 - On a launcher screen with zero accessibility text nodes, the app captured an accessibility screenshot, completed on-device OCR (248 characters), and started Android speech. No MediaProjection authorization dialog or ADB screenshot transport was used for that read.
 - Remote Sam synthesis originally returned HTTP 500 because the old process reported CUDA unavailable. A fresh process saw CUDA. Restarting only isis-voxcpm-speech.service restored authenticated synthesis: HTTP 200, valid WAV, 215,084 bytes, 3.8 seconds. No machine reboot/GPU reset.
 - Sisyphus assembleDebug + lintDebug passed at e1dae3d. Target SDK remains 34; the compile toolchain is updated separately. There is no existing unit-test suite in this repository.
+
+- Full launcher OCR read reached Android speech completion (248 characters). A controlled SIGKILL of only the app process was followed by Android automatically recreating the foreground service, reconnecting accessibility, and initializing phone TTS in under two seconds without opening ScreenSense or granting permissions again. This is process recovery, not a reboot/force-stop guarantee.
+
+- Settings UI checked on the phone: Ready via Accessibility, Accessibility Enabled, Phone voice selected. Speak Custom Text (blank/default sample) started and completed speech; Test Read Screen extracted 308 characters and started speech; a second tap cancelled. Returned foreground to ChatGPT afterward.
