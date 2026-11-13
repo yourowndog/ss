@@ -21,7 +21,8 @@ android {
         
         // Required for sherpa-onnx native libs
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            abiFilters += providers.gradleProperty("screensenseAbis").orNull?.split(",")
+                ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
         }
 
         // OpenAI-compatible Sam voice service on Titan. A local token file
