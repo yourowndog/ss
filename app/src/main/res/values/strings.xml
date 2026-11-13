@@ -8,7 +8,7 @@
     <string name="setup_title">ScreenSense Setup</string>
     <string name="permission_section">Permissions</string>
     <string name="screen_capture_permission">Screen Capture</string>
-    <string name="screen_capture_description">Required to capture screen content for AI analysis</string>
+    <string name="screen_capture_description">Android 11+: automatic screenshot fallback through Accessibility. Screen sharing is only needed on Android 10.</string>
     <string name="accessibility_permission">Accessibility Service</string>
     <string name="accessibility_description">Optional: Enables gesture triggers and direct screen reading</string>
     <string name="btn_grant">Grant</string>

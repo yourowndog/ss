@@ -4,6 +4,8 @@ import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.Locale
 import java.util.UUID
@@ -21,6 +23,7 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
     
     private var tts: TextToSpeech? = null
     private var isInitialized = false
+    private val initialized = CompletableDeferred<Boolean>()
     private var speechSpeed = 1.0f
     private var speechPitch = 1.0f
     
@@ -41,19 +44,24 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
             } else {
                 Log.e(TAG, "TTS initialization failed with status: $status")
             }
+            initialized.complete(isInitialized)
         }
     }
     
+    fun isSpeaking(): Boolean = tts?.isSpeaking == true
+
     override suspend fun speak(text: String) {
-        if (!isInitialized || text.isBlank()) return
+        if (text.isBlank()) return
+        check(withTimeout(5000L) { initialized.await() }) { "Android speech engine unavailable" }
         
         suspendCancellableCoroutine { continuation ->
             val utteranceId = UUID.randomUUID().toString()
             
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(id: String?) {}
+                override fun onStart(id: String?) { Log.d(TAG, "Speech playback started") }
                 
                 override fun onDone(id: String?) {
+                    Log.d(TAG, "Speech playback completed")
                     if (id == utteranceId && continuation.isActive) {
                         continuation.resume(Unit)
                     }
@@ -74,7 +82,11 @@ class AndroidTTSProvider(context: Context) : TTSProvider {
                 }
             })
             
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            val result = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            if (result != TextToSpeech.SUCCESS && continuation.isActive) {
+                continuation.resume(Unit)
+                Log.e(TAG, "Speech engine rejected utterance: $result")
+            }
             
             continuation.invokeOnCancellation {
                 tts?.stop()

@@ -263,22 +263,28 @@
                     android:id="@+id/rgProvider"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal">
+                    android:orientation="vertical">
+
+                    <RadioButton
+                        android:id="@+id/rbDevice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Phone voice (reliable default)" />
 
                     <RadioButton
                         android:id="@+id/rbLocal"
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
+
                         android:text="Local (Kokoro)" />
 
                     <RadioButton
                         android:id="@+id/rbCloud"
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
+
                         android:checked="true"
-                        android:text="Sam (Titan)" />
+                        android:text="Sam (Sisyphus, needs network)" />
                 </RadioGroup>
 
             </LinearLayout>
@@ -427,7 +433,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="1. Grant screen capture permission above"
+                    android:text="1. Enable ScreenSense Accessibility once"
                     android:textColor="@color/on_surface"
                     android:textSize="14sp" />
 

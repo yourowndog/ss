@@ -3,6 +3,12 @@ package com.screensense.service
 import android.accessibilityservice.AccessibilityButtonController
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.graphics.Bitmap
+import android.view.Display
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import android.os.Build
 import android.util.Log
 import android.view.KeyEvent
@@ -43,9 +49,19 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
         
         // Configure the service
         serviceInfo = serviceInfo.apply {
-            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_ACCESSIBILITY_BUTTON
+            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_ACCESSIBILITY_BUTTON or
+                AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
         }
         
+        // Android rebinds enabled accessibility services after process death/reboot.
+        try {
+            ContextCompat.startForegroundService(this, android.content.Intent(this, ScreenSenseService::class.java).apply {
+                action = ScreenSenseService.ACTION_START_TTS_HELPER
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Reader startup failed", e)
+        }
+
         // Register accessibility button callback for API 26+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val controller = accessibilityButtonController
@@ -89,7 +105,7 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
      * Detect volume button combos (Volume Down then Volume Up quickly).
      */
     override fun onKeyEvent(event: KeyEvent): Boolean {
-        if (event.action != KeyEvent.ACTION_DOWN) {
+        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) {
             return super.onKeyEvent(event)
         }
         
@@ -122,6 +138,30 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
         return super.onKeyEvent(event)
     }
     
+    /** One on-demand screenshot using accessibility, not a screen-sharing session. */
+    suspend fun captureScreenshot(): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return withTimeoutOrNull(5000L) {
+            suspendCancellableCoroutine { continuation ->
+                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                    override fun onSuccess(result: ScreenshotResult) {
+                        val buffer = result.hardwareBuffer
+                        val bitmap = try {
+                            val hardware = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                            try { hardware?.copy(Bitmap.Config.ARGB_8888, false) }
+                            finally { hardware?.recycle() }
+                        } finally { buffer.close() }
+                        if (continuation.isActive) continuation.resume(bitmap) else bitmap?.recycle()
+                    }
+                    override fun onFailure(errorCode: Int) {
+                        Log.w(TAG, "Accessibility screenshot failed: $errorCode")
+                        if (continuation.isActive) continuation.resume(null)
+                    }
+                })
+            }
+        }
+    }
+
     private fun resetVolumeCombo() {
         lastVolumeDownTime = 0L
         lastVolumeUpTime = 0L
@@ -138,7 +178,7 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
         }
         
         try {
-            startService(intent)
+            ContextCompat.startForegroundService(this, intent)
             Log.d(TAG, "Sent ACTION_TOGGLE_READ to service")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start service", e)
@@ -190,7 +230,7 @@ class ScreenSenseAccessibilityService : AccessibilityService() {
         nodes: MutableList<Pair<String, android.graphics.Rect>>,
         depth: Int
     ) {
-        if (!node.isVisibleToUser) return
+        if (!node.isVisibleToUser || node.isPassword || depth > 80) return
         
         val nodeText = node.text?.toString()?.trim()
         val nodeDesc = node.contentDescription?.toString()?.trim()

@@ -15,8 +15,8 @@ android {
         applicationId = "com.screensense"
         minSdk = 29  // Android 10+ for better MediaProjection handling
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         
         // Required for sherpa-onnx native libs
         ndk {

@@ -17,6 +17,7 @@ import com.screensense.MainActivity
 import com.screensense.R
 import com.screensense.ScreenSenseApp
 import com.screensense.capture.ScreenCapture
+import com.screensense.tts.AndroidTTSProvider
 import com.screensense.tts.KokoroTTSProvider
 import com.screensense.tts.OpenAITTSProvider
 import com.screensense.tts.TTSProvider
@@ -70,6 +71,8 @@ class ScreenSenseService : Service() {
     private var localTtsProvider: KokoroTTSProvider? = null
     private lateinit var cloudTtsProvider: OpenAITTSProvider
     private lateinit var watchTtsProvider: OpenAITTSProvider
+    private lateinit var deviceTtsProvider: AndroidTTSProvider
+    private var useDevice = true
     private var useCloud = true
     
     private var toneGenerator: ToneGenerator? = null
@@ -84,6 +87,7 @@ class ScreenSenseService : Service() {
     val isReading: Boolean get() {
         val jobActive = readingJob?.isActive == true
         val speaking = when (val provider = ttsProvider) {
+            is AndroidTTSProvider -> provider.isSpeaking()
             is KokoroTTSProvider -> provider.isSpeaking()
             is OpenAITTSProvider -> provider.isSpeaking()
             else -> false
@@ -108,7 +112,14 @@ class ScreenSenseService : Service() {
         
         cloudTtsProvider = OpenAITTSProvider(this)
         watchTtsProvider = OpenAITTSProvider(this)
-        ttsProvider = cloudTtsProvider
+        deviceTtsProvider = AndroidTTSProvider(this)
+        val prefs = getSharedPreferences("screensense_prefs", Context.MODE_PRIVATE)
+        useDevice = prefs.getBoolean("use_device", true)
+        useCloud = prefs.getBoolean("use_cloud", true)
+        ttsProvider = if (useDevice) deviceTtsProvider else if (useCloud) cloudTtsProvider
+            else KokoroTTSProvider(this).also { localTtsProvider = it }
+        ttsProvider.setSpeed(prefs.getFloat("speech_speed", 1.0f))
+        setSpeaker(prefs.getInt("speaker_id", 0))
         
         try {
             toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
@@ -123,6 +134,12 @@ class ScreenSenseService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand: ${intent?.action}")
         
+        // A cold shortcut and START_STICKY restart must satisfy the FGS deadline.
+        if (intent?.action != ACTION_STOP && intent?.action != ACTION_START_PROJECTION) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, createTtsNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            } else startForeground(NOTIFICATION_ID, createTtsNotification())
+        }
         when (intent?.action) {
             ACTION_START_TTS_HELPER -> {
                 Log.d(TAG, "Starting persistent Watch TTS helper")
@@ -191,7 +208,7 @@ class ScreenSenseService : Service() {
             ACTION_SPEAK_TEXT -> {
                 val text = intent.getStringExtra(EXTRA_SPEAK_TEXT)
                 if (!text.isNullOrBlank()) {
-                    Log.d(TAG, "Speak text: ${text.take(80)}...")
+                    Log.d(TAG, "Speak text requested: ${text.length} chars")
                     speakText(text)
                 } else {
                     Log.w(TAG, "SPEAK_TEXT intent with no text")
@@ -234,7 +251,7 @@ class ScreenSenseService : Service() {
         readingJob = serviceScope.launch {
             try {
                 Log.d(TAG, "Starting screen read (Hybrid Mode)...")
-                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP)
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
                 
                 // STEP 1: Fast Accessibility Read
                 var textToSpeak = ScreenSenseAccessibilityService.instance?.readScreenContentFromAccessibilityTree() ?: ""
@@ -245,28 +262,20 @@ class ScreenSenseService : Service() {
                 if (shouldUseFallback(textToSpeak)) {
                     Log.d(TAG, "Accessibility text poor/empty. Attempting Visual OCR fallback...")
                     
-                    if (isScreenCaptureReady()) {
-                        toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP) // Double beep for fallback start
-                        
-                        val bitmap = screenCapture.captureFrame()
-                        if (bitmap != null) {
+                    val accessibility = ScreenSenseAccessibilityService.instance
+                    val bitmap = accessibility?.captureScreenshot()
+                        ?: if (isScreenCaptureReady()) screenCapture.captureFrame() else null
+                    if (bitmap != null) {
+                        try {
                             val ocrResult = visionProvider.analyze(bitmap)
                             if (ocrResult.text.isNotBlank()) {
                                 textToSpeak = ocrResult.text
                                 usedFallback = true
                                 Log.d(TAG, "Visual OCR successful: ${textToSpeak.length} chars")
-                            } else {
-                                Log.w(TAG, "Visual OCR found no text")
                             }
-                        } else {
-                            Log.e(TAG, "Failed to capture frame for fallback")
-                        }
-                    } else {
-                        Log.w(TAG, "Fallback needed but Screen Capture NOT ready")
-                        // If we have NO text at all, warn the user
-                        if (textToSpeak.isBlank()) {
-                            textToSpeak = "Screen capture permission required for this content."
-                        }
+                        } finally { bitmap.recycle() }
+                    } else if (textToSpeak.isBlank()) {
+                        textToSpeak = "I cannot read this screen. Unlock your phone, or check ScreenSense accessibility settings when parked."
                     }
                 } else {
                     Log.d(TAG, "Accessibility read successful: ${textToSpeak.length} chars")
@@ -332,11 +341,14 @@ class ScreenSenseService : Service() {
         ttsProvider.stop()
     }
     
-    fun setUseCloud(cloud: Boolean) {
-        if (useCloud == cloud && ::ttsProvider.isInitialized) return
+    fun setUseCloud(cloud: Boolean, device: Boolean = false) {
+        if (useCloud == cloud && useDevice == device && ::ttsProvider.isInitialized) return
         ttsProvider.stop()
         useCloud = cloud
-        ttsProvider = if (useCloud) {
+        useDevice = device
+        ttsProvider = if (useDevice) {
+            deviceTtsProvider
+        } else if (useCloud) {
             cloudTtsProvider
         } else {
             localTtsProvider ?: KokoroTTSProvider(this).also { localTtsProvider = it }
@@ -486,6 +498,8 @@ class ScreenSenseService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        instance = null
+        deviceTtsProvider.release()
         ttsHttpServer?.stop()
         ttsHttpServer = null
         serviceScope.cancel()

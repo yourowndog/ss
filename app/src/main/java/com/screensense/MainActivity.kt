@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private var currentSpeakerId = 0
     private var currentSpeed = 1.0f
     private var useCloud = false
+    private var useDevice = true
     
     // Single launcher that does everything on permission grant
     private val mediaProjectionLauncher = registerForActivityResult(
@@ -184,6 +185,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.rgProvider.setOnCheckedChangeListener { _, checkedId ->
+            useDevice = checkedId == R.id.rbDevice
             useCloud = checkedId == R.id.rbCloud
             updateVoiceSliderRange()
             applyVoiceSettingsToService()
@@ -197,7 +199,8 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun updateVoiceSliderRange() {
-        val max = if (useCloud) (OpenAITTSProvider.VOICES.size - 1).toFloat() else 10f
+        val max = if (useDevice) 1f else if (useCloud) (OpenAITTSProvider.VOICES.size - 1).toFloat() else 10f
+        binding.sliderSpeaker.isEnabled = !useDevice
         binding.sliderSpeaker.valueTo = max
         if (currentSpeakerId > max) {
             currentSpeakerId = max.toInt()
@@ -208,8 +211,9 @@ class MainActivity : AppCompatActivity() {
     
     private fun setupVoiceSettingsListeners() {
         // Provider setup
-        binding.rbCloud.isChecked = useCloud
-        binding.rbLocal.isChecked = !useCloud
+        binding.rbDevice.isChecked = useDevice
+        binding.rbCloud.isChecked = !useDevice && useCloud
+        binding.rbLocal.isChecked = !useDevice && !useCloud
         updateVoiceSliderRange()
 
         // Speaker slider
@@ -256,6 +260,7 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun loadVoiceSettings() {
+        useDevice = prefs.getBoolean("use_device", true)
         if (prefs.getInt(PREF_VOICE_CONFIG_VERSION, 0) < VOICE_CONFIG_VERSION) {
             // Migrate existing installs to the new Sam voice instead of
             // preserving the old Kokoro/OpenAI provider selection.
@@ -279,13 +284,14 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putInt(PREF_SPEAKER_ID, currentSpeakerId)
             .putFloat(PREF_SPEECH_SPEED, currentSpeed)
+            .putBoolean("use_device", useDevice)
             .putBoolean(PREF_USE_CLOUD, useCloud)
             .putInt(PREF_VOICE_CONFIG_VERSION, VOICE_CONFIG_VERSION)
             .apply()
     }
     
     private fun applyVoiceSettingsToService() {
-        screenSenseService?.setUseCloud(useCloud)
+        screenSenseService?.setUseCloud(useCloud, useDevice)
         screenSenseService?.setSpeaker(currentSpeakerId)
         screenSenseService?.setSpeechSpeed(currentSpeed)
     }
@@ -409,13 +415,13 @@ class MainActivity : AppCompatActivity() {
         binding.screenCaptureStatus.text = if (isScreenCaptureReady) {
             getString(R.string.status_granted)
         } else {
-            "Not Granted (Optional)"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && isAccessibilityEnabled) "Ready via Accessibility" else "Optional legacy capture"
         }
         binding.screenCaptureStatus.setTextColor(
             ContextCompat.getColor(this, if (isScreenCaptureReady) R.color.success else R.color.warning)
         )
         binding.btnGrantScreenCapture.isEnabled = !isScreenCaptureReady
-        binding.btnGrantScreenCapture.visibility = View.VISIBLE // Always show for hybrid mode
+        binding.btnGrantScreenCapture.visibility = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) View.GONE else View.VISIBLE // Always show for hybrid mode
         
         // Accessibility status (required)
         binding.accessibilityStatus.text = if (isAccessibilityEnabled) {
@@ -441,8 +447,10 @@ class MainActivity : AppCompatActivity() {
         // Update voice settings labels
         updateSpeakerLabel()
         updateSpeedLabel()
-        binding.ttsProviderInfo.text = if (useCloud) {
-            "TTS: Sam Voice (Titan)"
+        binding.ttsProviderInfo.text = if (useDevice) {
+            "TTS: Phone voice (no cluster connection required)"
+        } else if (useCloud) {
+            "TTS: Sam Voice (Sisyphus)"
         } else {
             "TTS: Kokoro (Local)"
         }
