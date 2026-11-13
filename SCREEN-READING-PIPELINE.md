@@ -48,3 +48,15 @@ Build on Sisyphus in build.slice; Sleeper coordinates. Multiple sessions were ac
 - https://developer.android.com/reference/android/accessibilityservice/AccessibilityService
 - https://developer.android.com/media/grow/media-projection
 - https://www.samsung.com/us/support/answer/ANS10001906/
+
+## Verified repair outcome: November 13, 2026
+
+- Build and Android lint passed on Sisyphus for the repaired source and phone-specific packaging: 0 errors, 63 warnings. Latest tested executable source revision: f721677; subsequent e1dae3d adds README documentation only.
+- The phone now reports version 1.1.0 / code 2. The successful streamed installation preserved application data.
+- Accessibility rebound after the update without another manual grant. Android reports capabilities 137 (window text, filtered keys, screenshots), requestFilterKeyEvents=true, and no crashed ScreenSense service.
+- Samsung direct-access target is ScreenSense. A remote accessibility-button action reached the installed callback, extracted 1,648 characters, and reported Android speech playback starting. A subsequent action cancelled the read.
+- A separate live trigger found zero accessibility text nodes, successfully used screenshot OCR to extract 248 characters, and reported Android speech playback starting. The captured screen's contents were not copied into this record.
+- The reader is foreground with mediaPlayback type. Its default phone voice was used without requiring the cluster speech endpoint.
+- All pre-existing checkpoint/Watch branch commits were consolidated by normal fast-forward into GitHub master (e1dae3d at consolidation); the feature branch was published too. No branches were deleted.
+- Actual physical Power + Volume Up operation, sound reaching the vehicle, reboot recovery, and prolonged use remain unverified. Remote speech-start callbacks do not prove acoustic output.
+- The 3,000-character cap and lack of automatic scrolling remain documented limitations.
