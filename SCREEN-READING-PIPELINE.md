@@ -60,3 +60,12 @@ Build on Sisyphus in build.slice; Sleeper coordinates. Multiple sessions were ac
 - All pre-existing checkpoint/Watch branch commits were consolidated by normal fast-forward into GitHub master (e1dae3d at consolidation); the feature branch was published too. No branches were deleted.
 - Actual physical Power + Volume Up operation, sound reaching the vehicle, reboot recovery, and prolonged use remain unverified. Remote speech-start callbacks do not prove acoustic output.
 - The 3,000-character cap and lack of automatic scrolling remain documented limitations.
+
+## Verified repair results
+
+- Installed 1.1.0/code2 in place with the existing signing certificate; no uninstall or data reset. ARM64 package is 51 MiB (universal was 149 MiB). `adb install --no-incremental -r` succeeded; incremental installation was unreliable on this wireless link.
+- The new accessibility service remained enabled and bound, requesting key filtering with capabilities 137 (window content, key filtering, screenshots). Samsung Power + Volume Up target is assigned to ScreenSense.
+- Injected Power + Volume Up produced the accessibility-button callback, extracted 1,648 characters from ChatGPT, and started Android speech 213 ms after the read trigger. A second activation cancelled it. This verifies Android event handling, not physical switch feel or vehicle acoustics.
+- On a launcher screen with zero accessibility text nodes, the app captured an accessibility screenshot, completed on-device OCR (248 characters), and started Android speech. No MediaProjection authorization dialog or ADB screenshot transport was used for that read.
+- Remote Sam synthesis originally returned HTTP 500 because the old process reported CUDA unavailable. A fresh process saw CUDA. Restarting only isis-voxcpm-speech.service restored authenticated synthesis: HTTP 200, valid WAV, 215,084 bytes, 3.8 seconds. No machine reboot/GPU reset.
+- Sisyphus assembleDebug + lintDebug passed at e1dae3d. Target SDK remains 34; the compile toolchain is updated separately. There is no existing unit-test suite in this repository.
